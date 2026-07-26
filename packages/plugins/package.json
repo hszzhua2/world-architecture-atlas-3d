@@ -10,7 +10,7 @@
     "./raster-symbology": "./src/plugins/raster-symbology.ts"
   },
   "dependencies": {
-    "@carbonplan/zarr-layer": "^0.6.0",
+    "@carbonplan/zarr-layer": "^0.6.1",
     "@deck.gl/aggregation-layers": "9.3.7",
     "@deck.gl/core": "^9.3.7",
     "@deck.gl/geo-layers": "^9.3.7",
@@ -20,7 +20,7 @@
     "@developmentseed/deck.gl-geotiff": "^0.7.0",
     "@developmentseed/deck.gl-raster": "^0.7.0",
     "@developmentseed/morecantile": "^0.7.0",
-    "@dvt3d/maplibre-three-plugin": "^1.6.0",
+    "@dvt3d/maplibre-three-plugin": "^1.7.1",
     "@esri/maplibre-arcgis": "^1.3.0",
     "@geolibre/core": "*",
     "@geoman-io/maplibre-geoman-free": "^0.8.4",
@@ -54,7 +54,7 @@
     "maplibre-gl-splat": "^0.2.8",
     "maplibre-gl-streetview": "^0.7.0",
     "maplibre-gl-swipe": "^0.11.0",
-    "maplibre-gl-time-slider": "^1.6.0",
+    "maplibre-gl-time-slider": "^1.7.1",
     "maplibre-gl-usgs-lidar": "^0.11.1",
     "maplibre-gl-vector": "^0.10.0",
     "netcdfjs": "^4.0.0",
