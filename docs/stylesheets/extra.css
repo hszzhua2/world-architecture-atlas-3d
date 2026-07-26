@@ -1,0 +1,183 @@
+.md-header {
+  background-color: #ffffff;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow: none;
+  color: #17313b;
+}
+
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.6rem;
+  width: 1.6rem;
+}
+
+.md-search__form {
+  background-color: rgba(15, 23, 42, 0.06);
+}
+
+.md-search__input {
+  color: #17313b;
+}
+
+.md-search__input::placeholder {
+  color: rgba(23, 49, 59, 0.68);
+}
+
+.md-search__form:hover {
+  background-color: rgba(15, 23, 42, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background-color: #111827;
+  border-bottom-color: rgba(255, 255, 255, 0.12);
+  color: #f8fafc;
+}
+
+[data-md-color-scheme="slate"] .md-search__form {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-search__input {
+  color: #f8fafc;
+}
+
+[data-md-color-scheme="slate"] .md-search__input::placeholder {
+  color: rgba(248, 250, 252, 0.72);
+}
+
+[data-md-color-scheme="slate"] .md-search__form:hover {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.hero {
+  align-items: center;
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 1rem 0 2.5rem;
+}
+
+.md-grid {
+  max-width: 82rem;
+}
+
+.md-typeset .hero__content h1 {
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.05;
+  margin: 0.2rem 0 1rem;
+}
+
+.hero__lead {
+  color: var(--md-default-fg-color--light);
+  font-size: 1.05rem;
+  max-width: 46rem;
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.3rem;
+}
+
+.md-typeset > p > .md-button + .md-button {
+  margin-left: 0.6rem;
+}
+
+.hero__media {
+  margin: 0;
+}
+
+.hero__media img {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.5rem;
+  box-shadow: var(--md-shadow-z3);
+  display: block;
+  width: 100%;
+}
+
+.eyebrow {
+  color: var(--md-primary-fg-color);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+/* Sidebar section headers (User Guide, Tutorials, Reference).
+   Targets the internal Material nav classes that Zensical emits; tested against
+   zensical 0.0.x. Re-verify these selectors after a major theme upgrade. */
+.md-nav--primary .md-nav__item--section > .md-nav__link {
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+  color: var(--md-primary-fg-color);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-top: 1rem;
+  opacity: 1;
+  padding-top: 0.75rem;
+  text-transform: uppercase;
+}
+
+[data-md-color-scheme="slate"] .md-nav--primary .md-nav__item--section > .md-nav__link {
+  border-top-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Tighten the desktop sidebar nav only; the mobile drawer keeps its default touch targets. */
+@media screen and (min-width: 76.25em) {
+  .md-nav--primary .md-nav__item:not(.md-nav__item--section) {
+    margin-top: 0;
+  }
+
+  .md-nav--primary .md-nav__link {
+    margin-top: 0;
+    padding-bottom: 0.2rem;
+    padding-top: 0.2rem;
+  }
+}
+
+.feature-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  margin: 1.5rem 0 2rem;
+}
+
+.feature-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.feature-card h3 {
+  margin-top: 0;
+}
+
+@media screen and (min-width: 76.25em) {
+  .hero {
+    grid-template-columns: minmax(18rem, 0.9fr) minmax(20rem, 1.1fr);
+  }
+}
+
+@media screen and (max-width: 30em) {
+  .md-typeset > p > .md-button {
+    display: block;
+    text-align: center;
+    width: 100%;
+  }
+
+  .md-typeset > p > .md-button + .md-button {
+    margin-left: 0;
+    margin-top: 0.6rem;
+  }
+
+  .hero__actions {
+    flex-direction: column;
+  }
+
+  .hero__actions .md-button {
+    text-align: center;
+    width: 100%;
+  }
+}

@@ -1,0 +1,361 @@
+name: Release Desktop App
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-22.04
+            args: --bundles deb,rpm,appimage
+            rust-targets: ""
+
+          - name: Windows x64
+            os: windows-2025
+            args: --no-sign
+            rust-targets: ""
+
+          # macOS bundles are Developer ID signed and notarized via the
+          # APPLE_* secrets wired into the tauri-action step below, so users can
+          # open the DMG without stripping the quarantine attribute. Do not pass
+          # --no-sign here.
+          - name: macOS Apple Silicon
+            os: macos-latest
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin
+
+          - name: macOS Intel
+            os: macos-latest
+            args: --target x86_64-apple-darwin
+            rust-targets: x86_64-apple-darwin
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install macOS Rust target
+        if: matrix.rust-targets != ''
+        run: rustup target add ${{ matrix.rust-targets }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            rpm \
+            wget
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and upload release assets
+        uses: tauri-apps/tauri-action@v1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_OPTIONS: --max-old-space-size=4096
+          VITE_GEE_OAUTH_CLIENT_ID: ${{ secrets.VITE_GEE_OAUTH_CLIENT_ID }}
+          # macOS Developer ID signing + notarization. The secrets only resolve
+          # to real values on macOS runners; Linux/Windows get empty strings so
+          # the credentials are never placed in their process environment.
+          # APPLE_SIGNING_IDENTITY defaults to "-" when the secret is absent
+          # (e.g. a fork without secrets) so macOS still ad-hoc signs rather
+          # than failing the build now that tauri.conf.json no longer pins it.
+          APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && (secrets.APPLE_SIGNING_IDENTITY || '-') || '' }}
+          APPLE_ID: ${{ runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+        with:
+          projectPath: apps/geolibre-desktop
+          releaseId: ${{ github.event.release.id }}
+          tagName: ${{ github.event.release.tag_name }}
+          args: ${{ matrix.args }}
+          uploadPlainBinary: true
+
+      - name: Build MSIX package
+        id: build_msix
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/msix/build-msix.ps1
+
+      - name: Upload MSIX release asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $msix = "${{ steps.build_msix.outputs.msix_path }}"
+          if (-not (Test-Path $msix)) {
+            throw "No MSIX package was created at '$msix'."
+          }
+          gh release upload "${{ github.event.release.tag_name }}" "$msix" --clobber
+
+      - name: Build portable zip
+        id: build_portable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/portable/build-portable.ps1
+
+      - name: Upload portable zip release asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $portable = "${{ steps.build_portable.outputs.portable_path }}"
+          if (-not (Test-Path $portable)) {
+            throw "No portable zip was created at '$portable'."
+          }
+          gh release upload "${{ github.event.release.tag_name }}" "$portable" --clobber
+
+  homebrew:
+    name: Update Homebrew cask
+    needs: build
+    runs-on: ubuntu-latest
+    # The primary cask is in the official homebrew/homebrew-cask repo, which
+    # BrewTestBot auto-bumps via livecheck. This job only updates the self-hosted
+    # tap (opengeos/homebrew-geolibre), kept as a fallback.
+    # Serialise tap pushes so two close releases can't race on a non-fast-forward.
+    concurrency:
+      group: homebrew-tap-update
+      cancel-in-progress: false
+    # Only update the tap for full releases, not prereleases.
+    if: ${{ !github.event.release.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compute DMG checksums
+        id: checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${TAG#v}"
+          arm="GeoLibre.Desktop_${version}_aarch64.dmg"
+          intel="GeoLibre.Desktop_${version}_x64.dmg"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$arm" --pattern "$intel" --dir dmgs
+          {
+            echo "version=$version"
+            echo "sha_arm=$(sha256sum "dmgs/$arm" | awk '{print $1}')"
+            echo "sha_intel=$(sha256sum "dmgs/$intel" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v7
+        with:
+          repository: opengeos/homebrew-geolibre
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          persist-credentials: false
+
+      - name: Render and commit cask
+        env:
+          VERSION: ${{ steps.checksums.outputs.version }}
+          SHA256_ARM: ${{ steps.checksums.outputs.sha_arm }}
+          SHA256_INTEL: ${{ steps.checksums.outputs.sha_intel }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          mkdir -p tap/Casks
+          scripts/render-homebrew-cask.sh > tap/Casks/geolibre.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/geolibre.rb
+          # --cached so an initially untracked cask (fresh tap) is still detected.
+          if git diff --cached --quiet; then
+            echo "Cask already up to date for ${VERSION}."
+            exit 0
+          fi
+          git commit -m "geolibre ${VERSION}"
+          git push "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/opengeos/homebrew-geolibre.git" HEAD:main
+
+  aur:
+    name: Publish AUR package
+    needs: build
+    runs-on: ubuntu-latest
+    # Fully isolated from the asset build and the Homebrew job: it only `needs`
+    # build for the .deb, nothing depends on it, and continue-on-error means a
+    # failed AUR push leaves the release (and its other publish targets) green.
+    continue-on-error: true
+    # Serialise AUR pushes so two close releases can't race on a non-fast-forward.
+    concurrency:
+      group: aur-publish
+      cancel-in-progress: false
+    # Only publish for full releases, not prereleases.
+    if: ${{ !github.event.release.prerelease }}
+    env:
+      # Surfaced as an env var so steps can skip cleanly when the secret is
+      # absent (forks, or before the maintainer configures it).
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Render PKGBUILD from the release .deb
+        if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${TAG#v}"
+          deb="GeoLibre.Desktop_${version}_amd64.deb"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$deb" --dir debs
+          sha="$(sha256sum "debs/$deb" | awk '{print $1}')"
+          mkdir -p aur
+          VERSION="$version" SHA256_AMD64="$sha" REPO="$GITHUB_REPOSITORY" \
+            scripts/render-aur-pkgbuild.sh > aur/PKGBUILD
+          echo "----- rendered PKGBUILD -----"
+          cat aur/PKGBUILD
+
+      - name: Publish to the AUR
+        if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
+        # Pinned to a commit SHA (not a mutable tag) because this step receives
+        # the AUR SSH private key. Update deliberately when bumping the version.
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: geolibre-bin
+          pkgbuild: aur/PKGBUILD
+          commit_username: github-actions[bot]
+          commit_email: github-actions[bot]@users.noreply.github.com
+          ssh_private_key: ${{ env.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.event.release.tag_name }}"
+          allow_empty_commits: false
+          updpkgsums: false
+
+  copr:
+    name: Publish Fedora COPR package
+    needs: build
+    runs-on: ubuntu-latest
+    # Same isolation as the AUR job: only needs build for the .rpm, nothing
+    # depends on it, continue-on-error keeps a COPR failure from reddening the
+    # release, and it skips itself when the API token is absent (forks).
+    continue-on-error: true
+    concurrency:
+      group: copr-publish
+      cancel-in-progress: false
+    if: ${{ !github.event.release.prerelease }}
+    env:
+      COPR_API_TOKEN: ${{ secrets.COPR_API_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build SRPM and submit to COPR
+        if: ${{ env.COPR_API_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          COPR_PROJECT: giswqs/geolibre
+        run: |
+          version="${TAG#v}"
+          # Release date (YYYY-MM-DD) for the metainfo <release> and %changelog.
+          release_date="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json publishedAt --jq '.publishedAt' | cut -dT -f1)"
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm appstream
+          pipx install copr-cli
+          # copr-cli imports `rich` but does not always declare it as a dependency.
+          pipx inject copr-cli rich
+
+          # COPR API token config from the secret. Create it with restrictive
+          # permissions atomically (umask), not chmod-after-write.
+          mkdir -p ~/.config
+          (umask 177; printf '%s\n' "$COPR_API_TOKEN" > ~/.config/copr)
+
+          mkdir -p ~/rpmbuild/SPECS ~/rpmbuild/SOURCES
+          VERSION="$version" DATE="$release_date" \
+            scripts/render-linux-metainfo.sh > ~/rpmbuild/SOURCES/org.geolibre.desktop.metainfo.xml
+          VERSION="$version" DATE="$release_date" REPO="$GITHUB_REPOSITORY" \
+            scripts/render-copr-spec.sh > ~/rpmbuild/SPECS/geolibre.spec
+          # The spec ships the project license as Source2.
+          cp LICENSE ~/rpmbuild/SOURCES/
+
+          # Validate the metainfo in CI, independently of COPR's mock build.
+          appstreamcli validate --no-net ~/rpmbuild/SOURCES/org.geolibre.desktop.metainfo.xml
+
+          # The upstream RPM is Source0; rpmbuild needs it locally to build the
+          # SRPM (it does not fetch URLs).
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "GeoLibre.Desktop-${version}-1.x86_64.rpm" --dir ~/rpmbuild/SOURCES
+          # Log the checksum of the repackaged RPM for auditability.
+          sha256sum ~/rpmbuild/SOURCES/"GeoLibre.Desktop-${version}-1.x86_64.rpm" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+          srpm="$(rpmbuild -bs ~/rpmbuild/SPECS/geolibre.spec \
+            --define "_topdir $HOME/rpmbuild" | sed -n 's/^Wrote: //p')"
+          [[ -n "$srpm" ]] || { echo "::error::rpmbuild produced no SRPM path"; exit 1; }
+          echo "Built SRPM: $srpm"
+          copr-cli build --nowait "$COPR_PROJECT" "$srpm"
+
+  winget:
+    name: Publish to winget
+    needs: build
+    runs-on: ubuntu-latest
+    # Isolated like the AUR/COPR jobs: only needs build for the release assets,
+    # nothing depends on it, continue-on-error keeps a winget hiccup from
+    # failing the release, and it skips itself when WINGET_TOKEN is unset (forks,
+    # or before the maintainer configures it).
+    continue-on-error: true
+    concurrency:
+      group: winget-publish
+      cancel-in-progress: false
+    # Only publish for full releases, not prereleases.
+    if: ${{ !github.event.release.prerelease }}
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Submit OpenGeos.GeoLibre to winget-pkgs
+        if: ${{ env.WINGET_TOKEN != '' }}
+        # Pinned to a commit SHA (not the mutable v2 tag) because this step
+        # receives a token with access to the winget-pkgs fork. winget-releaser
+        # derives the version from the release tag and uses komac under the hood.
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: OpenGeos.GeoLibre
+          installers-regex: '_x64-setup\.exe$'
+          fork-user: giswqs
+          token: ${{ env.WINGET_TOKEN }}

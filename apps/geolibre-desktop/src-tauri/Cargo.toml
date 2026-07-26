@@ -1,0 +1,76 @@
+[package]
+name = "geolibre-desktop"
+version = "2.3.0"
+description = "GeoLibre Desktop — lightweight cloud-native desktop GIS"
+authors = ["GeoLibre Contributors"]
+edition = "2021"
+
+[lib]
+name = "geolibre_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = []
+native-duckdb = ["dep:duckdb"]
+
+# Optimize the release binary for size. The frontend assets dominate the binary,
+# but these still trim the Rust code: LTO + a single codegen unit let the linker
+# drop dead code across crates, `strip` removes symbols/debuginfo, `opt-level="s"`
+# favors size while keeping reasonable runtime speed, and `panic="abort"` drops
+# unwinding tables (a panic in the desktop shell terminates the app either way).
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = { version = "2", features = ["watch"] }
+# Native geolocation on Android/iOS: ships the location manifest permissions and
+# drives the OS permission dialog for Field Collection / GPS Tracking, which the
+# WebView's navigator.geolocation cannot do on Android. On desktop it is inert
+# (the frontend only invokes it on mobile).
+tauri-plugin-geolocation = "2"
+tauri-plugin-http = "2"
+tauri-plugin-opener = "2"
+# Persists the fs scope the folder picker grants, so Browser-panel pinned
+# folders stay readable across app restarts (no re-pick required).
+tauri-plugin-persisted-scope = "2"
+duckdb = { version = "1.10504.0", features = ["bundled", "parquet"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# rustls-tls stays the default backend for every request. rustls-tls-native-roots
+# also trusts the OS/system certificate store (enterprise CAs). native-tls (which
+# drags in openssl-sys) is used only on the opt-in mTLS path for PKCS#12 client
+# certificates (issue #1220), so it is added per-target below — everywhere except
+# Android, where there is no such path and openssl-sys cannot cross-compile for
+# the NDK.
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "rustls-tls",
+  "rustls-tls-native-roots",
+] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# OS CSPRNG for the per-launch Jupyter token (already an indirect dep).
+getrandom = "0.4"
+
+# native-tls backs only the desktop mTLS PKCS#12 path (issue #1220). It pulls in
+# openssl-sys, which has no vendored/cross build for the Android NDK, so the
+# feature is added on every target except Android (the code that uses it is
+# likewise cfg'd out in src/lib.rs).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+# Runtime WebKitGTK version check (already an indirect dep via tauri/wry).
+[target."cfg(target_os = \"linux\")".dependencies]
+webkit2gtk-sys = "2"

@@ -1,0 +1,101 @@
+ci:
+  # pre-commit.ci (https://pre-commit.ci) runs the hooks below on every PR and
+  # auto-commits any fixes with the message below. It authenticates via its own
+  # GitHub App, so it works on fork PRs too (unlike a GITHUB_TOKEN workflow,
+  # which is read-only on fork PRs and cannot push back). It does NOT run on
+  # push to main, so auto-formatted commits never bypass PR review.
+  # `npm-build` and `eslint` are skipped: they need the full toolchain
+  # (node_modules + a build) and run via the local npm scripts in dev only.
+  autofix_commit_msg: "style: auto-format (ruff + oxfmt) [pre-commit.ci]"
+  autofix_prs: true
+  autoupdate_schedule: weekly
+  skip: [npm-build, eslint]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-json
+        # This E2E fixture is intentionally malformed JSON — it drives the
+        # error-handling spec that asserts the app rejects a broken drop.
+        exclude: ^e2e/fixtures/malformed\.geojson$
+      - id: check-added-large-files
+        args: ["--maxkb=1024", "--enforce-all"]
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+        args: ["--unsafe"]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: trailing-whitespace
+
+  # Python formatting + linting via ruff. Implemented as local hooks (rather
+  # than the astral-sh/ruff-pre-commit repo) so pre-commit works offline / behind
+  # restricted networks: pre-commit installs the pinned ruff wheel itself
+  # (language: python + additional_dependencies), so contributors need no
+  # global ruff. This pin is the single source of truth -- pre-commit.ci runs
+  # these hooks directly, so there is no separate CI pin to keep in sync.
+  # ruff-format rewrites in place (a commit with bad style fails, re-add picks
+  # up the fix); `ruff` lints with --fix for the auto-fixable rules in ruff.toml
+  # (F/I/W/E). pre-commit.ci auto-commits the rewritten files on PRs.
+  - repo: local
+    hooks:
+      # Run `ruff check --fix` BEFORE `ruff format`: lint autofixes (import
+      # sorting via I, unused-import removal via F) can change layout, and the
+      # formatter must run last so a single pre-commit pass stabilizes the file.
+      # Matches the order recommended by ruff's docs and astral-sh/ruff-pre-commit.
+      - id: ruff
+        name: ruff check
+        entry: ruff check --config ruff.toml --fix
+        language: python
+        additional_dependencies: [ruff==0.15.22]
+        types_or: [python, pyi, jupyter]
+        pass_filenames: true
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format --config ruff.toml
+        language: python
+        additional_dependencies: [ruff==0.15.22]
+        # types_or alone scopes the hook: pre-commit ANDs it with `files`, so a
+        # `files` regex would only narrow it further. Covers .py, .pyi stubs,
+        # and Jupyter notebooks (ruff formats the Python cells).
+        types_or: [python, pyi, jupyter]
+        pass_filenames: true
+
+  # JS/TS/JSON/CSS/YAML/TOML formatting (oxfmt, the oxc project's formatter).
+  # All options AND ignore rules live in .oxfmtrc.json's `ignorePatterns`
+  # (oxfmt no longer needs a separate .prettierignore); .gitignore is also read.
+  - repo: local
+    hooks:
+      - id: oxfmt
+        name: oxfmt (JS/TS/JSON/CSS/YAML/TOML)
+        entry: oxfmt --write
+        language: node
+        # Single source of truth for the oxfmt version (pre-commit.ci runs
+        # this hook directly, no separate CI pin to keep in sync).
+        additional_dependencies: [oxfmt@0.59.0]
+        # ipynb is deliberately NOT here: ruff owns notebook Python cells, and
+        # oxfmt near them would fight the nbstripout hook below it.
+        # .oxfmtrc.json's ignorePatterns additionally excludes ipynb + lockfiles.
+        types_or: [ts, tsx, javascript, jsx, json, css, yaml, toml]
+        pass_filenames: true
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npm run lint
+        language: system
+        pass_filenames: false
+        types_or: [ts, tsx, javascript, jsx]
+      - id: npm-build
+        name: npm build
+        entry: npm run build
+        language: system
+        pass_filenames: false
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout

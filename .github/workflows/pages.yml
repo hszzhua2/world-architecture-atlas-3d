@@ -1,0 +1,105 @@
+name: Deploy Website
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build website and demo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-docs.txt
+            apps/geolibre-desktop/jupyterlite/requirements.txt
+
+      - name: Install documentation dependencies
+        run: python -m pip install -r requirements-docs.txt
+
+      - name: Install JupyterLite build dependencies
+        # Lets the web build's `prebuild` hook generate the self-hosted
+        # JupyterLite site (served in the Notebook panel); without these the step
+        # skips and the demo's notebook 404s on the published site.
+        run: python -m pip install -r apps/geolibre-desktop/jupyterlite/requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build web demo
+        run: npm run build -w geolibre-desktop
+        env:
+          GEOLIBRE_APP_BASE: ./
+          VITE_GEE_OAUTH_CLIENT_ID: ${{ secrets.VITE_GEE_OAUTH_CLIENT_ID }}
+          # Protomaps API key, baked into the client bundle so the New map
+          # dialog can offer Protomaps basemaps. When unset, those options are
+          # hidden (see getProtomapsStyleUrl in @geolibre/core).
+          VITE_PROTOMAPS_API_KEY: ${{ secrets.VITE_PROTOMAPS_API_KEY }}
+          # Google Photorealistic 3D Tiles and Google Street View use the same
+          # Maps key. Prefer the Vite-prefixed secret name, but also pass the
+          # bare name below so vite.config.ts can expose local/CI test setups.
+          VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          # Mapillary access token, baked into the client bundle so the
+          # Mapillary/Street View plugins work without each visitor pasting a
+          # token. It ends up publicly readable in the served JS, so it is not a
+          # true secret; a repo variable works as well as a secret here.
+          VITE_MAPILLARY_ACCESS_TOKEN: ${{ secrets.VITE_MAPILLARY_ACCESS_TOKEN || vars.VITE_MAPILLARY_ACCESS_TOKEN }}
+          # Public relay URL (baked into the client bundle), not a secret. Lights
+          # up live collaboration; requires the workers/collab relay to be
+          # deployed (see docs/collaboration.md).
+          VITE_GEOLIBRE_COLLAB_URL: wss://collab.geolibre.app
+
+      - name: Build documentation
+        run: zensical build --strict
+
+      - name: Add web demo to site
+        run: |
+          mkdir -p site/demo
+          cp -R apps/geolibre-desktop/dist/. site/demo/
+          test -f site/demo/index.html
+          test -f site/demo/jupyterlite/lab/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

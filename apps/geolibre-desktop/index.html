@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="%BASE_URL%favicon.png" sizes="32x32" />
+    <link rel="icon" href="%BASE_URL%favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
+    <!-- viewport-fit=cover lets the page extend under the mobile status/nav bars
+         and display cutouts so env(safe-area-inset-*) report their sizes; the app
+         shell then pads itself by those insets (see #root in src/index.css). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="A free and open-source, lightweight, cloud-native GIS platform for visualizing, exploring, and analyzing geospatial data, running in the browser, on the desktop, on mobile, and inside Jupyter notebooks while keeping your data local and private."
+    />
+    <meta name="theme-color" content="#2f8f85" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- Apple-prefixed variant kept for older iOS Safari (pre-17.4) home-screen
+         standalone mode; the standard tag above is what newer browsers expect. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="GeoLibre" />
+    <title>GeoLibre</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

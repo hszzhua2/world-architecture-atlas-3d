@@ -1,0 +1,575 @@
+name: Android
+
+# Android builds run on published releases (matching release.yml), not on every
+# PR — the Rust cross-compile + Gradle build is slow and rarely needs per-PR
+# coverage. Use the manual "Run workflow" button (workflow_dispatch) to build a
+# signed APK on demand from any branch.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Least privilege at the workflow level; the build job below elevates to
+# contents: write only where it needs to attach release assets.
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep these in sync with docs/android.md and the local setup.
+  #
+  # API 36 (Android 16), not 34: the Tauri v2.11 Android template generates
+  # `compileSdk = 36` / `targetSdk = 36`, so Gradle needs the matching platform
+  # installed. It is also the Google Play floor — from 2026-08-31 new apps and
+  # updates must target API 36 or the upload is rejected.
+  ANDROID_PLATFORM: "platforms;android-36"
+  ANDROID_BUILD_TOOLS: "build-tools;36.0.0"
+  # NDK r27 LTS — Tauri v2's supported line. Bump deliberately.
+  ANDROID_NDK_VERSION: "27.3.13750724"
+  # 16 KB page-size alignment for the Rust .so files (a Google Play requirement
+  # since 2025-11-01 for apps targeting Android 15+; GeoLibre targets 36).
+  # NDK r28+ emits aligned segments by default, r27 does not, so ask explicitly.
+  #
+  # This MUST be the RUSTFLAGS env var rather than `target.<triple>.rustflags`
+  # in a .cargo/config.toml: the Tauri CLI sets RUSTFLAGS itself when invoking
+  # cargo for Android, and an env RUSTFLAGS overrides the config file outright,
+  # so the config-file form is silently ignored and ships 4 KB-aligned libs.
+  # Tauri appends to an inherited value, so setting it here survives. Verified
+  # against real APKs: without it the shipped .so are 2**12, with it 2**14.
+  #
+  # Set at workflow level so the APK and AAB steps agree — a mismatch changes
+  # the cargo fingerprint and forces a full rebuild between them.
+  RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+  # The Android package id, asserted twice below. It comes from `identifier` in
+  # src-tauri/tauri.android.conf.json, which overrides the desktop
+  # `org.geolibre.desktop` for Android only. Google Play burns this permanently
+  # on first upload — it cannot be changed or reused afterwards — so it is
+  # verified rather than trusted.
+  EXPECTED_PACKAGE: "org.geolibre.app"
+
+jobs:
+  build:
+    name: Build Android APK (release)
+    runs-on: ubuntu-22.04
+    # Elevated here (not workflow-level) so only this job can write release
+    # assets; workflow_dispatch runs never attach but the grant is harmless.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        # Third-party action pinned to a full commit SHA (v4.0.1) per the repo's
+        # policy for non-official actions; a tag could be re-pointed. v4 runs on
+        # Node.js 24 (v3 targeted the now-deprecated Node.js 20).
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+
+      - name: Install Android NDK, platform, and build-tools
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "$ANDROID_PLATFORM" \
+            "$ANDROID_BUILD_TOOLS" \
+            "ndk;$ANDROID_NDK_VERSION"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Rust stable with Android targets
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          targets: >-
+            aarch64-linux-android,
+            armv7-linux-androideabi,
+            i686-linux-android,
+            x86_64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: apps/geolibre-desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Generate Android project
+        # gen/android is not committed; regenerate it on the clean runner. The
+        # Tauri CLI is resolved through the geolibre-desktop workspace.
+        working-directory: apps/geolibre-desktop
+        run: npx tauri android init
+
+      - name: Verify generated package id
+        # Fail fast, before the ~30 min build: assert the tauri.android.conf.json
+        # `identifier` override actually reached the generated Gradle project.
+        # A silent regression here ships an irreversible wrong package id to
+        # Play, so it is gated rather than assumed. The artifact itself is
+        # re-checked after the APK build.
+        working-directory: apps/geolibre-desktop
+        run: |
+          set -euo pipefail
+          gradle_file=src-tauri/gen/android/app/build.gradle.kts
+          # Tolerant of spacing so a cosmetic change to the Tauri template
+          # (`applicationId="x"`, extra indentation) fails the build only when
+          # the id is actually wrong, not when the formatting moved.
+          #
+          # The dots in the package id are regex metacharacters, so escape them
+          # before interpolating: the point of this step is that the id is
+          # *exactly* right (it is irreversible once uploaded to Play), and an
+          # unescaped pattern would also accept e.g. `orgXgeolibreYapp`.
+          escaped_package="${EXPECTED_PACKAGE//./\\.}"
+          if ! grep -qE "applicationId[[:space:]]*=[[:space:]]*\"$escaped_package\"" "$gradle_file"; then
+            echo "::error::applicationId is not $EXPECTED_PACKAGE in $gradle_file"
+            grep -nE 'applicationId|namespace' "$gradle_file" || true
+            exit 1
+          fi
+          echo "applicationId = $EXPECTED_PACKAGE (generated Gradle project)"
+
+      - name: Apply GeoLibre launcher icons
+        # `tauri android init` writes default Tauri icons; overwrite the generated
+        # mipmaps with the GeoLibre launcher icons checked in under src-tauri/icons.
+        working-directory: apps/geolibre-desktop
+        run: cp -r src-tauri/icons/android/. src-tauri/gen/android/app/src/main/res/
+
+      - name: Build release APKs (per ABI)
+        # Release (not --debug): the size-optimized + stripped Cargo profile keeps
+        # each .so small. --split-per-abi emits one ~40 MB APK per architecture
+        # instead of a single ~150 MB universal APK bundling all four ABIs.
+        # Release APKs are unsigned by default; the next step signs them.
+        working-directory: apps/geolibre-desktop
+        run: npx tauri android build --apk --split-per-abi
+        env:
+          VITE_GEE_OAUTH_CLIENT_ID: ${{ secrets.VITE_GEE_OAUTH_CLIENT_ID }}
+
+      - name: Verify built APK package id
+        # Second assertion, on the shipped bytes rather than the build script.
+        # `aapt2 dump packagename` reads the merged manifest, so this also
+        # catches a package id changed by manifest merging after Gradle
+        # configuration.
+        run: |
+          set -euo pipefail
+          build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          checked=0
+          while IFS= read -r apk; do
+            checked=$((checked + 1))
+            pkg="$("$build_tools/aapt2" dump packagename "$apk")"
+            if [ "$pkg" != "$EXPECTED_PACKAGE" ]; then
+              echo "::error::$apk has package '$pkg', expected '$EXPECTED_PACKAGE'"
+              exit 1
+            fi
+          # Scoped to outputs/apk/ for the same reason the AAB lookup below is
+          # scoped to outputs/bundle/: a bare `-name` searches the whole
+          # gen/android tree, including AGP's intermediates. No duplicate
+          # `*release-unsigned.apk` is known to exist there today, so this is
+          # precautionary rather than a fix — but the unscoped form is the one
+          # that already shipped the wrong artifact once for the AAB.
+          done < <(find apps/geolibre-desktop/src-tauri/gen/android \
+            -path '*/outputs/apk/*' -name '*release-unsigned.apk')
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::No APKs found to verify the package id against"
+            exit 1
+          fi
+          echo "All $checked APKs report package $EXPECTED_PACKAGE."
+
+      - name: Check for release keystore
+        id: keystore
+        # `secrets` cannot be used in a step-level `if:`, so presence is turned
+        # into an output here and gated on below. Deliberately keyed on the
+        # keystore rather than `event_name == 'release'` so a workflow_dispatch
+        # run with the secrets set can still exercise the full Play path.
+        #
+        # Checks all three secrets the signing step needs, not just the
+        # keystore: a partially-configured set (typo'd secret name, one value
+        # missing) would otherwise report present=true, spend several minutes on
+        # the Gradle bundle build, and only then hard-fail at signing.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "${KEYSTORE_BASE64:-}" ] && [ -n "${KEYSTORE_PASSWORD:-}" ] \
+            && [ -n "${KEY_ALIAS:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No complete release keystore — skipping the AAB build (it could not be signed or uploaded anyway)."
+          fi
+
+      - name: Build release AAB (universal)
+        # Skipped without a release keystore: the AAB can only be signed and
+        # uploaded on `sign_mode = release` runs, so building it otherwise is a
+        # full Gradle bundle build for an artifact that is discarded.
+        if: steps.keystore.outputs.present == 'true'
+        # Google Play requires an Android App Bundle, not an APK, for new apps —
+        # Play generates the per-device splits itself from this single artifact.
+        # Deliberately NOT --split-per-abi: that would emit one AAB per ABI, and
+        # Play wants the universal bundle containing all four. The per-ABI APKs
+        # above remain the sideload/GitHub-release path.
+        # The Rust objects are already built by the previous step, so this is
+        # mostly a Gradle repackage rather than a second cross-compile.
+        working-directory: apps/geolibre-desktop
+        run: npx tauri android build --aab
+        env:
+          VITE_GEE_OAUTH_CLIENT_ID: ${{ secrets.VITE_GEE_OAUTH_CLIENT_ID }}
+
+      - name: Verify built AAB package id
+        # Third assertion, on the artifact that actually reaches Play. The two
+        # checks above cover the Gradle script and the sideload APKs; the AAB is
+        # produced by a separate Gradle task, so on the "verify rather than
+        # trust" principle the rest of this workflow follows, the file Play
+        # burns the package id from is not left as the only unchecked one.
+        #
+        # bundletool rather than aapt2: an AAB's manifest is protobuf-encoded,
+        # not binary XML, so aapt2 cannot read it. Grepping the raw protobuf for
+        # the package string was rejected — it would match an occurrence
+        # anywhere in the manifest and cannot assert it is the `package`
+        # attribute, which is a weak check wearing the costume of a strong one.
+        if: steps.keystore.outputs.present == 'true'
+        env:
+          # Pinned; bump deliberately like the other tool versions above.
+          BUNDLETOOL_VERSION: "1.18.3"
+          # Pinned by digest, not just version, for the same reason the third-party
+          # Actions above are pinned to full commit SHAs: a release asset can be
+          # deleted and re-uploaded under the same tag. This one is executed
+          # (`java -jar`) inside a job that holds contents: write and, further
+          # down, the release signing secrets, so an unpinned binary would be the
+          # softest link in an otherwise pinned workflow.
+          BUNDLETOOL_SHA256: "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/bundletool.jar"
+          curl -fsSL -o "$jar" \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
+          # Verify before the jar is ever handed to java.
+          echo "$BUNDLETOOL_SHA256  $jar" | sha256sum -c -
+          mapfile -t aabs < <(find \
+            apps/geolibre-desktop/src-tauri/gen/android \
+            -path '*/outputs/bundle/*' -name '*.aab' | sort)
+          if [ "${#aabs[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one AAB under outputs/bundle/, found ${#aabs[@]}"
+            printf '::error::  %s\n' "${aabs[@]:-}"
+            exit 1
+          fi
+          pkg="$("$JAVA_HOME/bin/java" -jar "$jar" dump manifest \
+            --bundle="${aabs[0]}" --xpath=/manifest/@package)"
+          if [ "$pkg" != "$EXPECTED_PACKAGE" ]; then
+            echo "::error::${aabs[0]} has package '$pkg', expected '$EXPECTED_PACKAGE'"
+            exit 1
+          fi
+          echo "AAB ${aabs[0]} reports package $EXPECTED_PACKAGE."
+
+      - name: Verify 16 KB page alignment
+        # Play rejects apps targeting Android 15+ whose native libs are not
+        # 16 KB-aligned. The RUSTFLAGS above are what produce the alignment;
+        # this step proves they actually took effect, so a silent regression
+        # (flags dropped, Tauri overriding them, NDK change) fails here rather
+        # than at upload time.
+        #
+        # Inspects the .so *inside the built APKs* — the bytes Play receives —
+        # rather than a path under gen/android. Do not be tempted back to
+        # `find gen/android -path '*/release/*'`: Gradle's output dirs are
+        # arm64Release / armRelease / x86Release / x86_64Release (capital R),
+        # so that pattern matches nothing and the check never runs.
+        run: |
+          set -euo pipefail
+          objdump="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump"
+          checked=0
+          bad=0
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          # Unpack the native libs from every release APK *and* the AAB into one
+          # tree, then check all of them. The AAB matters most — it is what Play
+          # receives — and it stores libraries under `base/lib/<abi>/`, not
+          # `lib/<abi>/`, so it needs its own extract pattern. Checking only the
+          # APKs would leave the Play artifact unverified.
+          #
+          # Each archive extracts into its own subdirectory and is checked for a
+          # non-empty result immediately. Exit 11 ("no matching files") is
+          # tolerated rather than fatal, because it is exactly the symptom of an
+          # archive shipping no native code at all — a worse regression than
+          # misalignment, and one the aggregate `checked -eq 0` guard below
+          # cannot catch, since the other archives still contribute libraries
+          # and the total stays non-zero. Every *other* non-zero exit (a
+          # truncated archive, a full disk) is a real failure and is reported as
+          # itself, so it is not misattributed to "no native libraries".
+          archives=0
+          while IFS= read -r apk; do
+            archives=$((archives + 1))
+            dest="$workdir/$archives"
+            # `|| status=$?`, not `; status=$?`: under `set -e` the bare form
+            # aborts the step at the failing unzip and never reaches the
+            # assignment, which would turn the tolerated exit 11 into a build
+            # failure.
+            status=0
+            unzip -o -q "$apk" 'lib/*/*.so' -d "$dest" || status=$?
+            if [ "$status" -ne 0 ] && [ "$status" -ne 11 ]; then
+              echo "::error::unzip failed on $apk (exit $status)"
+              exit 1
+            fi
+            if [ "$(find "$dest" -name '*.so' 2>/dev/null | wc -l)" -eq 0 ]; then
+              echo "::error::$apk contains no native libraries under lib/"
+              bad=$((bad + 1))
+            fi
+          done < <(find apps/geolibre-desktop/src-tauri/gen/android \
+            -path '*/outputs/apk/*' -name '*release-unsigned.apk')
+          if [ "$archives" -eq 0 ]; then
+            echo "::error::No release APKs found to verify"
+            exit 1
+          fi
+          # The AAB is only built on release-keystore runs, so its absence here
+          # is not an error — but when present it must be verified too.
+          while IFS= read -r aab; do
+            archives=$((archives + 1))
+            dest="$workdir/$archives"
+            status=0
+            unzip -o -q "$aab" 'base/lib/*/*.so' -d "$dest" || status=$?
+            if [ "$status" -ne 0 ] && [ "$status" -ne 11 ]; then
+              echo "::error::unzip failed on $aab (exit $status)"
+              exit 1
+            fi
+            if [ "$(find "$dest" -name '*.so' 2>/dev/null | wc -l)" -eq 0 ]; then
+              echo "::error::$aab contains no native libraries under base/lib/"
+              bad=$((bad + 1))
+            fi
+          done < <(find apps/geolibre-desktop/src-tauri/gen/android \
+            -path '*/outputs/bundle/*' -name '*.aab')
+          while IFS= read -r so; do
+            checked=$((checked + 1))
+            # Per-file segment count. If objdump errors or emits no LOAD lines
+            # for this .so (corrupt artifact, foreign arch, tool change), the
+            # inner loop never runs, so without this the file would be counted
+            # as "checked" while nothing was actually inspected.
+            segments=0
+            # `objdump -p` prints one line per segment ending in `align 2**N`
+            # (readelf wraps LOAD across two lines, which makes it far easier to
+            # parse the wrong column). 2**14 == 16384 is the required minimum.
+            # awk strips the `2**` prefix, not the shell: in a `${x#2**}`
+            # expansion `*` is a glob, so that form silently yields `**14` and
+            # every comparison below becomes a no-op that passes.
+            while read -r exp; do
+              segments=$((segments + 1))
+              # Treat unparseable output as a failure, never as a pass — a
+              # tooling change that breaks the format must not read as "aligned".
+              case "$exp" in
+                '' | *[!0-9]*)
+                  echo "::error::$so: could not parse segment alignment ('$exp')"
+                  bad=$((bad + 1))
+                  ;;
+                *)
+                  if [ "$exp" -lt 14 ]; then
+                    echo "::error::$so has a LOAD segment aligned to 2**$exp (< 2**14)"
+                    bad=$((bad + 1))
+                  fi
+                  ;;
+              esac
+            done < <("$objdump" -p "$so" |
+              awk '$1 == "LOAD" { split($NF, a, /\*\*/); print a[2] }')
+            if [ "$segments" -eq 0 ]; then
+              echo "::error::$so: objdump reported no LOAD segments — nothing was verified"
+              bad=$((bad + 1))
+            fi
+          done < <(find "$workdir" -name '*.so')
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::No .so files found inside the APKs — the check would pass vacuously"
+            exit 1
+          fi
+          if [ "$bad" -gt 0 ]; then
+            # "problem(s)", not "segment(s)": $bad now also counts archives that
+            # shipped no native libraries and files objdump could not read, not
+            # just misaligned segments.
+            echo "::error::$bad problem(s) found; Play will reject this build"
+            exit 1
+          fi
+          echo "All $checked native libraries are 16 KB-aligned."
+
+      - name: Sign APKs and AAB
+        id: sign
+        # With release-keystore secrets set, the artifacts are signed for
+        # distribution. Without them, they're signed with a throwaway debug
+        # keystore so the CI APKs are still installable for testing (do NOT
+        # publish those). Emits signed=release|debug so the release-upload step
+        # can refuse to attach debug-signed APKs to a public GitHub Release.
+        #
+        # For Play, the keystore secrets hold the *upload* key, not the app
+        # signing key: Play App Signing re-signs the bundle with the key Google
+        # holds. A debug-signed AAB is useless — Play rejects it — so the AAB is
+        # only produced when the release keystore is present.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          store_pass_file="$RUNNER_TEMP/ks.pass"
+          key_pass_file="$RUNNER_TEMP/key.pass"
+          # Shred the password files on *every* exit path. Explicit `rm -f` at
+          # each error branch cannot cover an unexpected failure: under
+          # `set -e` a non-zero zipalign/apksigner/jarsigner aborts the script
+          # mid-step, leaving the keystore and key passwords readable in
+          # $RUNNER_TEMP for the rest of the job.
+          trap 'rm -f "$store_pass_file" "$key_pass_file"' EXIT
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            # Fail fast if the keystore secret is set but its companions are not,
+            # instead of a cryptic apksigner error later.
+            if [ -z "${KEYSTORE_PASSWORD:-}" ] || [ -z "${KEY_ALIAS:-}" ]; then
+              echo "::error::ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS must be set when ANDROID_KEYSTORE_BASE64 is provided"
+              exit 1
+            fi
+            echo "Signing with the release keystore from secrets."
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            keystore="$RUNNER_TEMP/release.jks"
+            printf '%s' "$KEYSTORE_PASSWORD" > "$store_pass_file"
+            printf '%s' "${KEY_PASSWORD:-$KEYSTORE_PASSWORD}" > "$key_pass_file"
+            alias="$KEY_ALIAS"
+            sign_mode=release
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret set — signing with a throwaway debug keystore. Installable for testing only, NOT for distribution."
+            sign_mode=debug
+            keystore="$RUNNER_TEMP/debug.jks"
+            "$JAVA_HOME/bin/keytool" -genkeypair -v -keystore "$keystore" \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            printf '%s' android > "$store_pass_file"
+            printf '%s' android > "$key_pass_file"
+            alias=androiddebugkey
+          fi
+          out="$RUNNER_TEMP/apks"; mkdir -p "$out"
+          found=0
+          while IFS= read -r unsigned; do
+            found=1
+            # e.g. app-arm64-v8a-release-unsigned.apk -> geolibre-arm64-v8a.apk
+            abi="$(basename "$unsigned" | sed -E 's/^app-(.*)-release-unsigned\.apk$/\1/')"
+            aligned="$RUNNER_TEMP/aligned-$abi.apk"
+            signed="$out/geolibre-android-$abi.apk"
+            # -P 16, not -p: the 16 KB requirement has two independent axes.
+            # The RUSTFLAGS above fix the ELF segment alignment *inside* the
+            # .so; this fixes the .so's byte offset *within the APK zip*, which
+            # is what lets the OS mmap it directly under extractNativeLibs=false.
+            # Lowercase -p only guarantees 4 KB. AGP currently happens to emit
+            # 16 KB-aligned offsets anyway, so -p passes today by luck; -P 16
+            # states the requirement so a future AGP change cannot silently
+            # regress it. (-P needs build-tools 35+; this workflow pins 36.)
+            "$build_tools/zipalign" -P 16 -f 4 "$unsigned" "$aligned"
+            # Pass passwords via files (pass:file:) so they never appear in the
+            # process argument list / CI logs.
+            "$build_tools/apksigner" sign --ks "$keystore" \
+              --ks-pass "file:$store_pass_file" --key-pass "file:$key_pass_file" \
+              --ks-key-alias "$alias" --out "$signed" "$aligned"
+            "$build_tools/apksigner" verify "$signed"
+            # Verify the zip-entry axis on the final artifact. The ELF axis is
+            # checked before signing; this is the one zipalign controls, and
+            # checking it here (post-sign) covers the bytes Play receives.
+            "$build_tools/zipalign" -c -P 16 -v 4 "$signed" > /dev/null || {
+              echo "::error::$signed is not 16 KB zip-aligned; Play will reject it"
+              exit 1
+            }
+            echo "signed $signed ($(du -h "$signed" | cut -f1))"
+          done < <(find apps/geolibre-desktop/src-tauri/gen/android \
+            -path '*/outputs/apk/*' -name '*release-unsigned.apk')
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No release-unsigned APKs found"; exit 1
+          fi
+
+          # AAB for Google Play. jarsigner, not apksigner: apksigner only handles
+          # APKs. Only signed with a real upload key — a debug-signed bundle is
+          # rejected by Play, so shipping one would just be a confusing artifact.
+          if [ "$sign_mode" = release ]; then
+            aab_out="$RUNNER_TEMP/aab"; mkdir -p "$aab_out"
+            # Scope to outputs/bundle/. A bare `-name '*.aab'` is NOT enough:
+            # the build also leaves AGP's internal
+            #   app/build/intermediates/intermediary_bundle/.../intermediary-bundle.aab
+            # so an unscoped match plus `head -1` depends on find's traversal
+            # order and can select the intermediate — signing and uploading the
+            # wrong artifact to Play. Verified locally: two .aab exist after a
+            # successful build.
+            #
+            # `outputs/bundle` are literal lowercase directories, so this does
+            # not reintroduce the camelCase trap (`universalRelease/` is matched
+            # by the wildcard, never spelled out).
+            mapfile -t aab_candidates < <(find \
+              apps/geolibre-desktop/src-tauri/gen/android \
+              -path '*/outputs/bundle/*' -name '*.aab' | sort)
+            if [ "${#aab_candidates[@]}" -eq 0 ]; then
+              echo "::error::No AAB found under outputs/bundle/"; exit 1
+            fi
+            if [ "${#aab_candidates[@]}" -gt 1 ]; then
+              # Ambiguity must not be resolved by picking one arbitrarily.
+              echo "::error::Expected exactly one AAB, found ${#aab_candidates[@]}:"
+              printf '::error::  %s\n' "${aab_candidates[@]}"
+              exit 1
+            fi
+            aab="${aab_candidates[0]}"
+            echo "Using AAB: $aab"
+            signed_aab="$aab_out/geolibre-android.aab"
+            cp "$aab" "$signed_aab"
+            "$JAVA_HOME/bin/jarsigner" -keystore "$keystore" \
+              -storepass:file "$store_pass_file" -keypass:file "$key_pass_file" \
+              -sigalg SHA256withRSA -digestalg SHA-256 "$signed_aab" "$alias"
+            "$JAVA_HOME/bin/jarsigner" -verify "$signed_aab"
+            echo "signed $signed_aab ($(du -h "$signed_aab" | cut -f1))"
+          else
+            echo "::warning::Skipping AAB signing — no release keystore. The Play upload artifact is not produced on this run."
+          fi
+
+          # Emit the outcome only after every artifact has signed and verified,
+          # so a downstream always() step can never read signed=release on a
+          # failure.
+          echo "signed=$sign_mode" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: geolibre-android-release-apks
+          path: ${{ runner.temp }}/apks/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Play AAB
+        # Separate artifact from the APKs: this is the file you upload to the
+        # Play Console, and it only exists on release-keystore runs. Deliberately
+        # NOT attached to the GitHub Release — an .aab is not user-installable
+        # and would only confuse people looking for a sideload download.
+        if: steps.sign.outputs.signed == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: geolibre-android-play-aab
+          path: ${{ runner.temp }}/aab/*.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach APKs to GitHub Release
+        # Only on a published release, and only when the APKs were signed with the
+        # real release keystore — never publish debug-signed builds as official
+        # downloads. workflow_dispatch runs still get the CI artifact above.
+        if: github.event_name == 'release' && steps.sign.outputs.signed == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "$RUNNER_TEMP"/apks/*.apk --clobber
+
+      - name: Note skipped release upload
+        # Surface why a release run did not attach APKs (missing keystore secrets),
+        # so it does not look like a silent failure.
+        if: github.event_name == 'release' && steps.sign.outputs.signed != 'release'
+        run: |
+          echo "::warning::APKs were debug-signed (no ANDROID_KEYSTORE_BASE64 secret) and were NOT attached to the release. They are available as the CI artifact for testing only."

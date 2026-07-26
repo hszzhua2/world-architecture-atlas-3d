@@ -1,0 +1,115 @@
+site_name: GeoLibre
+site_description: A lightweight, cloud-native GIS platform for visualizing, exploring, and analyzing geospatial data across desktop and web environments, with a responsive layout for mobile screens.
+site_url: https://geolibre.app
+repo_name: opengeos/GeoLibre
+repo_url: https://github.com/opengeos/GeoLibre
+edit_uri: edit/main/docs/
+# Output directory, set explicitly so the build target stays pinned to `site/`
+# (matching the Pages upload paths) rather than relying on the tool's
+# default, which a Zensical 0.0.x patch could shift.
+site_dir: site
+
+theme:
+  name: material
+  logo: assets/geolibre-icon.png
+  favicon: assets/geolibre-icon.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Downloads: downloads.md
+  - Launch GeoLibre Web: /demo/
+  - User Guide:
+      - Interface Overview: user-guide/interface.md
+      - Projects: user-guide/projects.md
+      - Adding Data: user-guide/adding-data.md
+      - Managing Layers: user-guide/layers.md
+      - Styling Layers: user-guide/styling.md
+      - Attribute Table: user-guide/attribute-table.md
+      - Map Controls & Tools: user-guide/map-controls.md
+      - Processing Tools: user-guide/processing.md
+      - AI Segmentation: user-guide/segmentation.md
+      - SQL Workspace: user-guide/sql-workspace.md
+      - Python Console: user-guide/python-console.md
+      - AI Assistant: user-guide/ai-assistant.md
+      - Data Integrations: user-guide/data-integrations.md
+      - Plugins & Marketplace: user-guide/plugins.md
+      - Settings & Preferences: user-guide/settings.md
+      - Story Maps: user-guide/storymaps.md
+      - Embedding & Sharing: user-guide/embedding.md
+      - Troubleshooting: user-guide/troubleshooting.md
+  - Tutorials:
+      - Overview: tutorials/index.md
+      - Your First Map: tutorials/first-map.md
+      - Cloud-Native Data: tutorials/cloud-native-data.md
+      - Vector Analysis: tutorials/vector-analysis.md
+      - Terrain Analysis: tutorials/terrain-analysis.md
+      - Spatial SQL: tutorials/spatial-sql.md
+      - Sharing & Embedding: tutorials/sharing-embedding.md
+  - Reference:
+      - Architecture: architecture.md
+      - Android: android.md
+      - iOS: ios.md
+      - Project Format: project-format.md
+      - Plugin API: plugin-api.md
+      - UI Profiles: ui-profiles.md
+      - Internationalization: i18n.md
+      - Python Package: python.md
+      - Notebook Panel: notebook.md
+      - Roadmap: roadmap.md
+      - Contributing: contributing.md
+      - How to Cite: citation.md
+      - Acknowledgements: acknowledgements.md
+      - Privacy Policy: privacy.md
+      - Terms of Service: terms.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/opengeos/GeoLibre
+      name: GeoLibre on GitHub

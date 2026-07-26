@@ -1,0 +1,11 @@
+name,lng,lat,modelUrl,scale,bearing
+Eiffel Tower,2.2945,48.8584,http://localhost:5173/models/eiffel-tower.glb,1,0
+Big Ben,-0.1246,51.5007,http://localhost:5173/models/big-ben.glb,1,0
+Statue of Liberty,-74.0445,40.6892,http://localhost:5173/models/statue-of-liberty.glb,1,0
+Great Pyramid of Giza,31.1342,29.9792,http://localhost:5173/models/great-pyramid.glb,1,0
+Tokyo Tower,139.7454,35.6586,http://localhost:5173/models/tokyo-tower.glb,1,0
+Empire State Building,-73.9857,40.7484,http://localhost:5173/models/empire-state.glb,1,0
+Sydney Opera House,151.2153,-33.8568,http://localhost:5173/models/sydney-opera.glb,1,0
+Burj Khalifa,55.2744,25.1972,http://localhost:5173/models/burj-khalifa.glb,1,0
+Taj Mahal,78.0421,27.1751,http://localhost:5173/models/taj-mahal.glb,1,0
+Forbidden City,116.3972,39.9163,http://localhost:5173/models/forbidden-city.glb,1,0

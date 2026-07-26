@@ -1,0 +1,225 @@
+name: PR preview
+
+# Stage 1 of 2: BUILD ONLY. No secrets are available to this workflow.
+#
+# This job runs `npm ci` and a full Vite build from the pull request's own
+# tree, so on a fork PR it executes code written by an outside contributor.
+# That is why it holds nothing worth stealing: `permissions` is read-only and
+# no `secrets.*` is referenced anywhere below. It produces a `pr-preview-site`
+# artifact and stops.
+#
+# Stage 2 (.github/workflows/pr-preview-deploy.yml) picks that artifact up on
+# `workflow_run` and publishes it. That job DOES hold PREVIEW_DEPLOY_TOKEN and
+# CLOUDFLARE_API_TOKEN, but it only moves static files -- it never runs
+# contributor code. Splitting it this way is what lets previews work for fork
+# PRs at all: the `pull_request` event withholds repository secrets from forks,
+# and `workflow_run` runs from the default branch with them restored.
+#
+# Do NOT "fix" anything here by switching to pull_request_target: that would
+# put the secrets back into the same job as the contributor's build script,
+# which is the exact arrangement this split exists to avoid.
+#
+# The build-time `secrets.*` still referenced below are the exception that
+# proves the rule. On a fork-triggered `pull_request` run GitHub resolves every
+# one of them to an empty string, so a fork build never sees them; on a
+# maintainer's same-repo branch they resolve normally, exactly as before. The
+# practical effect is that fork previews build without the Google Maps /
+# Protomaps / GEE keys and those basemaps are absent from the preview, while
+# maintainer previews are unchanged. That asymmetry is the point -- do not
+# "fix" it by moving the keys somewhere a fork run can read.
+#
+# Do NOT add any secret here whose absence a fork build cannot tolerate, and
+# never the deploy tokens: those live in stage 2 only.
+#
+# Publishing fork-authored HTML/JS under opengeos.org/pages-preview/ puts it on
+# a real origin the project owns. That is inherent to previewing a fork, but it
+# means the repository's "Require approval for all external contributors"
+# setting is load-bearing: stage 1 will not run until a maintainer approves the
+# run, and stage 2 only fires after stage 1 succeeds, so that approval gates
+# the publish too. Keep it on.
+#
+# The build mirrors .github/workflows/pages.yml (the GitHub Pages production
+# deploy) so previews match what ships:
+#   docs deps -> jupyterlite deps -> npm ci -> web demo build -> docs build ->
+#   bundle demo into site/demo.
+#
+# Optional build-time values, baked into the client bundle, same as pages.yml:
+#   VITE_GEE_OAUTH_CLIENT_ID, VITE_PROTOMAPS_API_KEY,
+#   VITE_GOOGLE_MAPS_API_KEY or GOOGLE_MAPS_API_KEY, VITE_MAPILLARY_ACCESS_TOKEN
+# Empty on fork runs, per the note above.
+#
+# The deploy secrets that used to live here (PREVIEW_DEPLOY_TOKEN,
+# CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID) moved to stage 2.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, closed]
+  workflow_dispatch:
+
+# Read-only, and deliberately so -- see the header. The PR comment is posted by
+# stage 2, which has `pull-requests: write`.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build preview
+    runs-on: ubuntu-latest
+    steps:
+      # On `closed` there is nothing to build, but the job still has to run and
+      # succeed: it is what triggers stage 2, which removes the published
+      # preview. Every build step below is skipped and no artifact is uploaded;
+      # stage 2 reads the PR's state from the API rather than from anything
+      # this job hands it.
+      - name: Note the removal trigger
+        if: github.event.action == 'closed'
+        run: echo "PR closed -- stage 2 will remove the preview."
+
+      - name: Checkout repository
+        if: github.event.action != 'closed'
+        uses: actions/checkout@v7
+        with:
+          # Match ci.yml: don't leave the GITHUB_TOKEN in .git/config where an
+          # npm lifecycle script during `npm ci`/`npm run build` could read it.
+          persist-credentials: false
+
+      - name: Set up Python
+        if: github.event.action != 'closed'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-docs.txt
+            apps/geolibre-desktop/jupyterlite/requirements.txt
+
+      - name: Install documentation dependencies
+        if: github.event.action != 'closed'
+        run: python -m pip install -r requirements-docs.txt
+
+      - name: Install JupyterLite build dependencies
+        if: github.event.action != 'closed'
+        run: python -m pip install -r apps/geolibre-desktop/jupyterlite/requirements.txt
+
+      - name: Set up Node.js
+        if: github.event.action != 'closed'
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        if: github.event.action != 'closed'
+        run: npm ci
+
+      - name: Build web demo
+        if: github.event.action != 'closed'
+        run: npm run build -w geolibre-desktop
+        env:
+          GEOLIBRE_APP_BASE: ./
+          # All empty on a fork run -- see the header. Mapillary additionally
+          # falls back to a public repository variable, so that one basemap
+          # does survive into fork previews.
+          VITE_GEE_OAUTH_CLIENT_ID: ${{ secrets.VITE_GEE_OAUTH_CLIENT_ID }}
+          VITE_PROTOMAPS_API_KEY: ${{ secrets.VITE_PROTOMAPS_API_KEY }}
+          VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          VITE_MAPILLARY_ACCESS_TOKEN: ${{ secrets.VITE_MAPILLARY_ACCESS_TOKEN || vars.VITE_MAPILLARY_ACCESS_TOKEN }}
+          VITE_GEOLIBRE_COLLAB_URL: wss://collab.geolibre.app
+
+      - name: Build documentation
+        if: github.event.action != 'closed'
+        run: zensical build --strict
+
+      - name: Add web demo to site
+        if: github.event.action != 'closed'
+        run: |
+          mkdir -p site/demo
+          cp -R apps/geolibre-desktop/dist/. site/demo/
+          test -f site/demo/index.html
+          test -f site/demo/jupyterlite/lab/index.html
+
+      - name: Check the site fits GitHub Pages
+        if: github.event.action != 'closed'
+        run: |
+          set -euo pipefail
+          echo "preview size: $(du -sh site | cut -f1)"
+          # 104857600 bytes = 100 MB, the Pages per-file hard limit.
+          oversized=$(find site -type f -size +104857600c -printf '%s\t%p\n' || true)
+          if [ -n "$oversized" ]; then
+            echo "::error::Files exceed the 100 MB GitHub Pages limit:"
+            echo "$oversized"
+            exit 1
+          fi
+
+      - name: Map oversized DuckDB WASM to a CDN redirect
+        if: github.event.action != 'closed'
+        # Cloudflare Pages rejects any single file > 25 MiB. The bundled DuckDB
+        # WASM modules (duckdb-eh ~35 MiB, duckdb-mvp ~40 MiB) exceed that, so
+        # we point their hashed URLs at jsDelivr at the exact pinned version
+        # (byte-identical to the bundled file).
+        #
+        # This step only WRITES site/_redirects; it does not delete anything.
+        # GitHub Pages allows 100 MB per file and ignores `_redirects`, so the
+        # Pages copy keeps serving the modules locally. Stage 2 deletes them
+        # right before the Cloudflare deploy, once Pages has had the full set.
+        #
+        # Any OTHER oversized file is a hard error here, which is also what
+        # lets stage 2 delete by size alone: if this step passed, every file
+        # over 25 MiB has a redirect.
+        run: |
+          set -euo pipefail
+          version=$(node -e "console.log(require('./node_modules/@duckdb/duckdb-wasm/package.json').version)")
+          echo "duckdb-wasm version: $version"
+          redirects=site/_redirects
+          touch "$redirects"
+          mapped=0
+          # 26214400 bytes = 25 MiB, Cloudflare Pages' exact per-file limit.
+          while IFS= read -r -d '' f; do
+            rel=${f#site}
+            base=$(basename "$f")
+            case "$base" in
+              duckdb-eh-*)  cdn=duckdb-eh.wasm ;;
+              duckdb-mvp-*) cdn=duckdb-mvp.wasm ;;
+              duckdb-coi-*) cdn=duckdb-coi.wasm ;;
+              *)
+                echo "::error::Oversized file not handled by CDN redirect: $rel ($(du -h "$f" | cut -f1)). Cloudflare Pages rejects files > 25 MiB."
+                exit 1 ;;
+            esac
+            echo "$rel https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@${version}/dist/${cdn} 302" >> "$redirects"
+            echo "redirect: $rel -> $cdn"
+            mapped=$((mapped + 1))
+          done < <(find site -type f -size +26214400c -print0)
+          echo "mapped $mapped oversized file(s)"
+          echo "----- site/_redirects -----"
+          cat "$redirects"
+
+      # The Pages publish in stage 2 happens via `git add`, which honors any
+      # .gitignore inside the payload and would silently drop those files from
+      # the commit while the build still reports success.
+      - name: Strip .gitignore files from the site
+        if: github.event.action != 'closed'
+        run: find site -name .gitignore -print -delete
+
+      - name: Upload the built site
+        if: github.event.action != 'closed'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-preview-site
+          path: site
+          # upload-artifact drops dotfiles by default, which would quietly gut
+          # parts of the JupyterLite build. The .gitignore strip above already
+          # ran, so nothing unwanted comes back with them.
+          include-hidden-files: true
+          if-no-files-found: error
+          # The payload is a few hundred MB and is consumed minutes later.
+          retention-days: 1
+          # Mostly pre-compressed wasm/js; level 6 costs minutes for almost no
+          # size win on this payload.
+          compression-level: 1
